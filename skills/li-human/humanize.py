@@ -93,6 +93,32 @@ def pass_invisible(text, lex):
     return text, hits
 
 
+DASH_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
+
+
+def _replace_dashes(text, dash):
+    """Turn a dash into the punctuation a person would type.
+
+    A pair of dashes in one sentence is a parenthetical, so both become commas.
+    A single dash followed by three or more words is joining two clauses
+    ("skills — it's about storytelling"); a comma there makes a comma splice,
+    so it becomes a full stop and the next word is capitalised. A single dash
+    before a short tail ("fine — mostly") stays a comma.
+    """
+    split = re.compile(r"\s*" + re.escape(dash) + r"\s*")
+
+    def fix(m):
+        sentence = m.group(0)
+        parts = split.split(sentence)
+        if len(parts) == 2:
+            head, tail = parts
+            if len(tail.split()) >= 3 and head.strip():
+                return head.rstrip(",;:") + ". " + tail[:1].upper() + tail[1:]
+        return ", ".join(parts)
+
+    return DASH_SENTENCE_RE.sub(fix, text)
+
+
 def pass_typographic(text, lex):
     hits = []
     for entry in lex["typographic"]:
@@ -102,11 +128,10 @@ def pass_typographic(text, lex):
             continue
         hits.append({"name": f"{ch} {entry['name']}", "count": n, "to": entry["to"].strip() or "(space)"})
         if ch == "—":
-            # " word — word " and "word—word" both collapse to a comma + space.
-            text = re.sub(r"\s*—\s*", ", ", text)
+            text = _replace_dashes(text, "—")
         elif ch == "–":
             text = re.sub(r"\s*–\s*(?=\d)", "-", text)      # 5–10  -> 5-10
-            text = re.sub(r"\s+–\s+", ", ", text)            # used as em dash
+            text = _replace_dashes(text, " – ")              # used as em dash
             text = text.replace("–", "-")
         else:
             text = text.replace(ch, entry["to"])
@@ -126,6 +151,18 @@ def _match_case(src, repl):
     return repl
 
 
+CAP_MARK = "\x01"
+
+
+def _replace_match(src, repl):
+    # Deleting a capitalised phrase ("At the end of the day, it's...") leaves
+    # the next word lowercase at the start of a sentence. Mark the spot so the
+    # next word can be capitalised once the leftover punctuation is gone.
+    if not repl and src[:1].isupper():
+        return CAP_MARK
+    return _match_case(src, repl)
+
+
 def pass_lexical(text, lex):
     """Replace slop words and phrases. Longest first so phrases win."""
     hits = []
@@ -140,11 +177,14 @@ def pass_lexical(text, lex):
             continue
         hits.append({"find": find, "replace": entry["replace"] or "(deleted)",
                      "count": len(found), "family": entry["family"]})
-        text = pattern.sub(lambda m: _match_case(m.group(0), entry["replace"]), text)
+        text = pattern.sub(lambda m: _replace_match(m.group(0), entry["replace"]), text)
     # Clean up after deletions.
+    text = re.sub(CAP_MARK + r"[\s,;:]*([a-z])", lambda m: m.group(1).upper(), text)
+    text = re.sub(CAP_MARK + r"[ \t]*[,;:]?[ \t]*", "", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"(?m)^[ \t]*([,.;:])\s*", "", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r",(?:\s*,)+", ",", text)        # "is, at the end of the day, fine"
     text = re.sub(r"(?m)^[ \t]+$", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     # An em dash that became a comma, followed by a sentence connective, leaves
